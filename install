@@ -2,13 +2,8 @@
 
 set -Eeuo pipefail
 
-# =========================================================
-# LyingMan 狼人杀一键安装脚本
-# =========================================================
-
 APP_DIR="/root/LyingMan"
 SERVICE_NAME="lyingman"
-
 SOURCE_REPO="https://github.com/linchuming/LyingMan.git"
 
 NODE_VERSION="4.9.1"
@@ -19,460 +14,295 @@ NVM_DIR="/root/.nvm"
 NODE_BIN="${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/node"
 NPM_BIN="${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/npm"
 
+NGINX_CONF="/etc/nginx/sites-available/lyingman"
+NGINX_LINK="/etc/nginx/sites-enabled/lyingman"
+
+BACKUP_DIR="/root"
+
+DOMAIN_FILE="/root/.lyingman_domain"
+
+
 # =========================================================
 # 基础函数
 # =========================================================
 
-log() {
+pause() {
     echo
-    echo "========================================"
-    echo "$1"
-    echo "========================================"
+    read -r -p "按 Enter 返回菜单..." _
+}
+
+print_line() {
+    echo "=============================================="
 }
 
 error_exit() {
     echo
-    echo "========================================"
-    echo "安装失败"
-    echo "========================================"
-    echo
-    echo "$1"
+    echo "❌ 操作失败：$1"
     echo
     exit 1
 }
 
-# 捕获错误
-trap 'echo; echo "错误发生在第 ${LINENO} 行"; exit 1' ERR
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        error_exit "请使用 root 用户运行此脚本。"
+    fi
+}
+
+install_basic_packages() {
+    echo
+    echo "正在安装基础依赖..."
+
+    apt-get update
+
+    apt-get install -y \
+        git \
+        curl \
+        wget \
+        nginx \
+        openssl \
+        build-essential \
+        ca-certificates \
+        python3 \
+        certbot \
+        python3-certbot-nginx
+
+    echo "✅ 基础依赖安装完成"
+}
+
 
 # =========================================================
-# Root 检查
+# Node.js / NVM
 # =========================================================
 
-if [ "$(id -u)" -ne 0 ]; then
-    error_exit "请使用 root 用户运行此脚本。"
-fi
+install_node() {
 
-clear 2>/dev/null || true
+    echo
+    echo "=============================================="
+    echo "        安装 Node.js ${NODE_VERSION}"
+    echo "=============================================="
 
-echo "========================================"
-echo "      LyingMan 狼人杀一键安装脚本"
-echo "========================================"
-echo
-echo "项目：LyingMan"
-echo "作者项目：https://github.com/linchuming/LyingMan"
-echo
+    export NVM_DIR="${NVM_DIR}"
 
-# =========================================================
-# 1. 系统依赖
-# =========================================================
+    if [ ! -s "${NVM_DIR}/nvm.sh" ]; then
 
-log "[1/9] 安装系统依赖"
+        echo "正在安装 NVM..."
 
-export DEBIAN_FRONTEND=noninteractive
+        curl -fsSL \
+            https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh \
+            | bash
 
-apt-get update
+    fi
 
-apt-get install -y \
-    git \
-    curl \
-    wget \
-    ca-certificates \
-    build-essential \
-    nginx \
-    openssl \
-    python3
+    export NVM_DIR="${NVM_DIR}"
 
-# =========================================================
-# 2. NVM
-# =========================================================
+    if [ -f "${NVM_DIR}/nvm.sh" ]; then
+        source "${NVM_DIR}/nvm.sh"
+    else
+        error_exit "NVM 安装失败。"
+    fi
 
-log "[2/9] 安装 NVM"
-
-export NVM_DIR="/root/.nvm"
-
-if [ ! -s "${NVM_DIR}/nvm.sh" ]; then
-    echo "正在安装 NVM..."
-
-    curl -fsSL \
-        https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh \
-        | bash
-fi
-
-if [ ! -s "${NVM_DIR}/nvm.sh" ]; then
-    error_exit "NVM 安装失败。"
-fi
-
-source "${NVM_DIR}/nvm.sh"
-
-# =========================================================
-# 3. Node.js
-# =========================================================
-
-log "[3/9] 安装 Node.js ${NODE_VERSION}"
-
-if ! nvm ls "${NODE_VERSION}" 2>/dev/null | grep -q "v${NODE_VERSION}"; then
     echo "正在安装 Node.js ${NODE_VERSION}..."
-    nvm install "${NODE_VERSION}"
-fi
 
-nvm alias default "${NODE_VERSION}" >/dev/null 2>&1 || true
-nvm use "${NODE_VERSION}"
+    if ! nvm ls "${NODE_VERSION}" >/dev/null 2>&1; then
+        nvm install "${NODE_VERSION}"
+    fi
 
-echo
-echo "Node.js: $(node -v)"
-echo "npm:     $(npm -v)"
+    nvm alias default "${NODE_VERSION}" >/dev/null 2>&1 || true
+    nvm use "${NODE_VERSION}" >/dev/null 2>&1 || true
 
-if [ "$(node -v)" != "v${NODE_VERSION}" ]; then
-    error_exit "Node.js 版本错误。"
-fi
+    if [ ! -x "${NODE_BIN}" ]; then
+        error_exit "Node.js ${NODE_VERSION} 安装失败。"
+    fi
 
-# =========================================================
-# 4. 下载 LyingMan
-# =========================================================
+    echo
+    echo "Node:"
+    "${NODE_BIN}" -v
 
-log "[4/9] 下载 LyingMan"
+    echo "NPM:"
+    "${NPM_BIN}" -v
 
-# 停止旧服务
-systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+    echo
+    echo "✅ Node.js 安装完成"
+}
 
-# 如果已经存在旧目录，备份
-if [ -d "${APP_DIR}" ]; then
-
-    BACKUP_DIR="${APP_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
-
-    echo "发现旧目录：${APP_DIR}"
-    echo "备份到：${BACKUP_DIR}"
-
-    mv "${APP_DIR}" "${BACKUP_DIR}"
-fi
-
-echo
-echo "正在从 GitHub 下载 LyingMan..."
-
-git clone --depth=1 "${SOURCE_REPO}" "${APP_DIR}"
-
-if [ ! -d "${APP_DIR}" ]; then
-    error_exit "LyingMan 下载失败。"
-fi
-
-if [ ! -f "${APP_DIR}/server/server.js" ]; then
-    error_exit "没有找到 server/server.js，项目结构异常。"
-fi
-
-echo
-echo "LyingMan 下载完成。"
 
 # =========================================================
-# 5. 修复老项目并安装依赖
+# 修复 package.json
 # =========================================================
 
-log "[5/9] 修复项目并安装依赖"
+fix_package_json() {
 
-SERVER_DIR="${APP_DIR}/server"
-SERVER_PACKAGE="${SERVER_DIR}/package.json"
+    local SERVER_DIR="${APP_DIR}/server"
+    local SERVER_PACKAGE="${SERVER_DIR}/package.json"
 
-if [ ! -f "${SERVER_PACKAGE}" ]; then
-    error_exit "没有找到 ${SERVER_PACKAGE}"
-fi
+    if [ ! -f "${SERVER_PACKAGE}" ]; then
+        error_exit "找不到 ${SERVER_PACKAGE}"
+    fi
 
-echo "发现服务端 package.json："
-echo "${SERVER_PACKAGE}"
+    echo
+    echo "检查 package.json..."
 
-echo
-echo "检查项目名称..."
+    if grep -q '"name"[[:space:]]*:[[:space:]]*"LyingMan Server"' "${SERVER_PACKAGE}"; then
 
-# ---------------------------------------------------------
-# 修复老项目：
-#
-# "name": "LyingMan Server"
-#
-# npm 2 会认为这是非法 package name
-# ---------------------------------------------------------
+        echo "发现旧项目存在非法 npm 名称：LyingMan Server"
+        echo "正在修复为：lyingman-server"
 
-if grep -q '"name"[[:space:]]*:[[:space:]]*"LyingMan Server"' "${SERVER_PACKAGE}"; then
+        sed -i \
+            's/"name"[[:space:]]*:[[:space:]]*"LyingMan Server"/"name": "lyingman-server"/' \
+            "${SERVER_PACKAGE}"
 
-    echo "发现非法项目名称：LyingMan Server"
-    echo "正在修复为：lyingman-server"
+        echo "✅ package.json 已修复"
 
-    sed -i \
-        's/"name"[[:space:]]*:[[:space:]]*"LyingMan Server"/"name": "lyingman-server"/' \
-        "${SERVER_PACKAGE}"
+    else
 
-fi
+        echo "✅ package.json 无需修复"
 
-# 再检查一次
-if grep -q '"name"[[:space:]]*:[[:space:]]*"LyingMan Server"' "${SERVER_PACKAGE}"; then
-    error_exit "package.json 修复失败。"
-fi
+    fi
+}
 
-echo
-echo "package.json 检查完成。"
-
-cd "${SERVER_DIR}"
-
-echo
-echo "开始安装 Node.js 依赖..."
-echo
-
-"${NPM_BIN}" install --unsafe-perm
-
-if [ ! -d "${SERVER_DIR}/node_modules" ]; then
-    error_exit "npm install 完成，但没有发现 node_modules。"
-fi
-
-echo
-echo "Node.js 依赖安装成功。"
 
 # =========================================================
-# 6. 创建 systemd
+# 创建 systemd
 # =========================================================
 
-log "[6/9] 创建 LyingMan systemd 服务"
+create_service() {
 
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+    echo
+    echo "正在创建 systemd 服务..."
+
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=LyingMan Werewolf Game Server
 After=network.target
 
 [Service]
 Type=simple
-
 WorkingDirectory=${APP_DIR}
-
-Environment=PATH=${NVM_DIR}/versions/node/v${NODE_VERSION}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
 ExecStart=${NODE_BIN} ${APP_DIR}/server/server.js
-
 Restart=always
 RestartSec=5
-
-KillSignal=SIGINT
+Environment=NODE_ENV=production
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
+    systemctl daemon-reload
+    systemctl enable "${SERVICE_NAME}"
 
-systemctl enable "${SERVICE_NAME}"
-
-systemctl restart "${SERVICE_NAME}"
-
-sleep 5
-
-# =========================================================
-# 7. 检查游戏服务
-# =========================================================
-
-log "[7/9] 检查 LyingMan 服务"
-
-if systemctl is-active --quiet "${SERVICE_NAME}"; then
-
-    echo "LyingMan 服务：运行中"
-
-else
-
-    echo "LyingMan 服务启动失败。"
-    echo
-    echo "最近日志："
-    echo
-
-    journalctl \
-        -u "${SERVICE_NAME}" \
-        -n 80 \
-        --no-pager || true
-
-    error_exit "LyingMan 服务启动失败，请检查上面的日志。"
-fi
-
-echo
-echo "检查 Web 端口 ${WEB_PORT}..."
-
-if ss -lntp 2>/dev/null | grep -q ":${WEB_PORT} "; then
-    echo "Web 端口 ${WEB_PORT}：正常"
-else
-    echo "警告：没有检测到 ${WEB_PORT}。"
-fi
-
-echo
-echo "检查 WebSocket 端口 ${WS_PORT}..."
-
-if ss -lntp 2>/dev/null | grep -q ":${WS_PORT} "; then
-    echo "WebSocket 端口 ${WS_PORT}：正常"
-else
-    echo "警告：没有检测到 ${WS_PORT}。"
-fi
-
-# =========================================================
-# 8. 询问域名
-# =========================================================
-
-log "[8/9] 配置访问方式"
-
-echo
-echo "请选择访问方式："
-echo
-echo "1. 输入域名"
-echo "   自动配置 Nginx + HTTPS + WSS"
-echo
-echo "2. 不使用域名"
-echo "   直接按 Enter，使用 IP + HTTP + WS"
-echo
-
-read -r -p "请输入绑定域名（直接回车使用 IP 模式）: " DOMAIN
-
-echo
-
-# =========================================================
-# 获取服务器 IP
-# =========================================================
-
-SERVER_IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-
-# =========================================================
-# 域名模式
-# =========================================================
-
-if [ -n "${DOMAIN}" ]; then
-
-    echo
-    echo "使用域名模式：${DOMAIN}"
-    echo
-
-    if [ -n "${SERVER_IP}" ]; then
-        echo "当前服务器公网 IP：${SERVER_IP}"
-        echo
-        echo "请确保："
-        echo "${DOMAIN} → ${SERVER_IP}"
-        echo
-    fi
-
-    # -----------------------------------------------------
-    # Nginx
-    # -----------------------------------------------------
-
-    echo "[1/3] 配置 Nginx..."
-
-    rm -f /etc/nginx/sites-enabled/default
-
-    cat > /etc/nginx/sites-available/lyingman <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-
-    server_name ${DOMAIN};
-
-    location /ws/ {
-        proxy_pass http://127.0.0.1:${WS_PORT}/;
-
-        proxy_http_version 1.1;
-
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-
-        proxy_read_timeout 86400;
-        proxy_send_timeout 86400;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:${WEB_PORT};
-
-        proxy_http_version 1.1;
-
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
+    echo "✅ systemd 服务创建完成"
 }
-EOF
 
-    ln -sf \
-        /etc/nginx/sites-available/lyingman \
-        /etc/nginx/sites-enabled/lyingman
-
-    nginx -t
-
-    systemctl enable nginx
-    systemctl restart nginx
-
-    # -----------------------------------------------------
-    # Certbot
-    # -----------------------------------------------------
-
-    echo
-    echo "[2/3] 安装 Certbot..."
-
-    apt-get install -y \
-        certbot \
-        python3-certbot-nginx
-
-    echo
-    echo "[3/3] 申请 HTTPS SSL 证书..."
-    echo
-
-    if certbot \
-        --nginx \
-        -d "${DOMAIN}" \
-        --non-interactive \
-        --agree-tos \
-        --register-unsafely-without-email \
-        --redirect; then
-
-        echo
-        echo "SSL 证书申请成功！"
-
-    else
-
-        echo
-        echo "SSL 证书申请失败。"
-        echo
-        echo "常见原因："
-        echo "1. 域名没有解析到本服务器"
-        echo "2. DNS 尚未生效"
-        echo "3. 80 端口无法从公网访问"
-        echo
-        echo "先使用 HTTP："
-        echo "http://${DOMAIN}"
-        echo
-    fi
-
-    systemctl restart nginx
-
-    # -----------------------------------------------------
-    # 最终地址
-    # -----------------------------------------------------
-
-    if [ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]; then
-
-        ACCESS_URL="https://${DOMAIN}"
-        WS_URL="wss://${DOMAIN}/ws/"
-
-    else
-
-        ACCESS_URL="http://${DOMAIN}"
-        WS_URL="ws://${DOMAIN}/ws/"
-
-    fi
 
 # =========================================================
-# IP 模式
+# 安装 / 重新安装
 # =========================================================
 
-else
+install_lyingman() {
+
+    print_line
+    echo "          安装 / 重新安装 LyingMan"
+    print_line
+
+    install_basic_packages
+    install_node
+
+    # 备份旧目录
+    if [ -d "${APP_DIR}" ]; then
+
+        BACKUP_NAME="LyingMan.backup.$(date +%Y%m%d_%H%M%S)"
+
+        echo
+        echo "发现旧版 LyingMan。"
+        echo "正在备份到：${BACKUP_DIR}/${BACKUP_NAME}"
+
+        mv "${APP_DIR}" "${BACKUP_DIR}/${BACKUP_NAME}"
+
+        echo "✅ 旧版本已备份"
+    fi
 
     echo
-    echo "使用 IP 模式。"
+    echo "正在下载 LyingMan..."
+
+    git clone "${SOURCE_REPO}" "${APP_DIR}"
+
+    echo "✅ LyingMan 下载完成"
+
+    SERVER_DIR="${APP_DIR}/server"
+
+    if [ ! -d "${SERVER_DIR}" ]; then
+        error_exit "找不到 server 目录。"
+    fi
+
+    fix_package_json
+
+    echo
+    echo "正在安装项目依赖..."
+
+    cd "${SERVER_DIR}"
+
+    "${NPM_BIN}" install --unsafe-perm
+
+    echo
+    echo "✅ 项目依赖安装完成"
+
+    create_service
+
+    echo
+    echo "正在启动 LyingMan..."
+
+    systemctl restart "${SERVICE_NAME}"
+
+    sleep 3
+
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        echo "✅ LyingMan 启动成功"
+    else
+        echo "❌ LyingMan 启动失败"
+        systemctl status "${SERVICE_NAME}" --no-pager
+        return 1
+    fi
+
+    configure_network
+
+    echo
+    echo "=============================================="
+    echo "           LyingMan 安装完成"
+    echo "=============================================="
+
+    show_status
+
+    pause
+}
+
+
+# =========================================================
+# Nginx + 域名 / IP
+# =========================================================
+
+configure_network() {
+
+    echo
+    print_line
+    echo "           配置网站访问方式"
+    print_line
+
+    echo
+    echo "请输入你的域名。"
+    echo "如果没有域名，直接按 Enter 使用 IP + HTTP。"
     echo
 
-    rm -f /etc/nginx/sites-enabled/default
+    read -r -p "域名: " DOMAIN
 
-    cat > /etc/nginx/sites-available/lyingman <<EOF
+    if [ -z "${DOMAIN}" ]; then
+
+        echo
+        echo "未输入域名。"
+        echo "正在配置 IP + HTTP + WS..."
+
+        rm -f "${NGINX_LINK}"
+
+        cat > "${NGINX_CONF}" <<EOF
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -483,120 +313,477 @@ server {
         proxy_pass http://127.0.0.1:${WS_PORT}/;
 
         proxy_http_version 1.1;
-
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
 
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
 
         proxy_read_timeout 86400;
-        proxy_send_timeout 86400;
     }
 
     location / {
         proxy_pass http://127.0.0.1:${WEB_PORT};
 
         proxy_http_version 1.1;
-
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
 
-    ln -sf \
-        /etc/nginx/sites-available/lyingman \
-        /etc/nginx/sites-enabled/lyingman
+        ln -sf "${NGINX_CONF}" "${NGINX_LINK}"
 
-    nginx -t
+        nginx -t
+        systemctl enable nginx
+        systemctl restart nginx
 
-    systemctl enable nginx
-    systemctl restart nginx
+        rm -f "${DOMAIN_FILE}"
 
-    ACCESS_URL="http://${SERVER_IP}"
-    WS_URL="ws://${SERVER_IP}/ws/"
+        echo
+        echo "✅ IP + HTTP + WS 配置完成"
 
-fi
+        SERVER_IP="$(curl -4 -s https://icanhazip.com || true)"
+
+        echo
+        echo "访问地址："
+        echo "http://${SERVER_IP}"
+
+    else
+
+        echo
+        echo "检测到域名：${DOMAIN}"
+        echo "正在配置 HTTPS + WSS..."
+
+        echo "${DOMAIN}" > "${DOMAIN_FILE}"
+
+        rm -f "${NGINX_LINK}"
+
+        cat > "${NGINX_CONF}" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name ${DOMAIN};
+
+    location / {
+        proxy_pass http://127.0.0.1:${WEB_PORT};
+
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
+    location /ws/ {
+        proxy_pass http://127.0.0.1:${WS_PORT}/;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+
+        proxy_read_timeout 86400;
+    }
+}
+EOF
+
+        ln -sf "${NGINX_CONF}" "${NGINX_LINK}"
+
+        nginx -t
+        systemctl enable nginx
+        systemctl restart nginx
+
+        echo
+        echo "正在申请 SSL 证书..."
+
+        certbot --nginx \
+            -d "${DOMAIN}" \
+            --non-interactive \
+            --agree-tos \
+            --register-unsafely-without-email \
+            --redirect
+
+        echo
+        echo "✅ HTTPS + WSS 配置完成"
+
+        echo
+        echo "访问地址："
+        echo "https://${DOMAIN}"
+    fi
+}
+
 
 # =========================================================
-# 9. 最终检查
+# 启动
 # =========================================================
 
-log "[9/9] 最终检查"
+start_service() {
 
-echo
-echo "LyingMan 服务："
+    systemctl start "${SERVICE_NAME}"
 
-if systemctl is-active --quiet "${SERVICE_NAME}"; then
-    echo "✓ 正常运行"
-else
-    echo "✗ 异常"
-fi
+    sleep 2
 
-echo
-echo "Nginx："
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        echo "✅ LyingMan 已启动"
+    else
+        echo "❌ 启动失败"
+        systemctl status "${SERVICE_NAME}" --no-pager
+    fi
 
-if systemctl is-active --quiet nginx; then
-    echo "✓ 正常运行"
-else
-    echo "✗ 异常"
-fi
+    pause
+}
 
-echo
-echo "监听端口："
-
-ss -lntp 2>/dev/null | grep -E ":(${WEB_PORT}|${WS_PORT}|80) " || true
 
 # =========================================================
-# 安装完成
+# 停止
 # =========================================================
 
-echo
-echo
-echo "========================================"
-echo "       LyingMan 安装完成！"
-echo "========================================"
-echo
+stop_service() {
 
-echo "网站地址："
-echo "${ACCESS_URL}"
+    systemctl stop "${SERVICE_NAME}" || true
 
-echo
-echo "WebSocket："
-echo "${WS_URL}"
+    echo
+    echo "✅ LyingMan 已停止"
 
-echo
-echo "========================================"
-echo "常用命令"
-echo "========================================"
-echo
+    pause
+}
 
-echo "查看游戏状态："
-echo "systemctl status ${SERVICE_NAME}"
 
-echo
-echo "重启游戏："
-echo "systemctl restart ${SERVICE_NAME}"
+# =========================================================
+# 重启
+# =========================================================
 
-echo
-echo "停止游戏："
-echo "systemctl stop ${SERVICE_NAME}"
+restart_service() {
 
-echo
-echo "查看游戏日志："
-echo "journalctl -u ${SERVICE_NAME} -f"
+    systemctl restart "${SERVICE_NAME}"
 
-echo
-echo "重启 Nginx："
-echo "systemctl restart nginx"
+    sleep 2
 
-echo
-echo "========================================"
-echo "感谢使用 LyingMan 一键安装脚本"
-echo "========================================"
-echo
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        echo "✅ LyingMan 已重启"
+    else
+        echo "❌ 重启失败"
+        systemctl status "${SERVICE_NAME}" --no-pager
+    fi
+
+    pause
+}
+
+
+# =========================================================
+# 状态
+# =========================================================
+
+show_status() {
+
+    echo
+    print_line
+    echo "              LyingMan 状态"
+    print_line
+
+    echo
+    systemctl status "${SERVICE_NAME}" --no-pager || true
+
+    echo
+    echo "监听端口："
+
+    ss -lntp 2>/dev/null | grep -E ":(${WEB_PORT}|${WS_PORT})" || true
+
+    echo
+
+    if [ -f "${DOMAIN_FILE}" ]; then
+
+        DOMAIN="$(cat "${DOMAIN_FILE}")"
+
+        echo "域名：${DOMAIN}"
+        echo "网站：https://${DOMAIN}"
+        echo "WebSocket：wss://${DOMAIN}/ws/"
+
+    else
+
+        SERVER_IP="$(curl -4 -s https://icanhazip.com || true)"
+
+        echo "IP：${SERVER_IP}"
+        echo "网站：http://${SERVER_IP}"
+        echo "WebSocket：ws://${SERVER_IP}/ws/"
+
+    fi
+
+    pause
+}
+
+
+# =========================================================
+# 日志
+# =========================================================
+
+show_logs() {
+
+    echo
+    print_line
+    echo "             LyingMan 实时日志"
+    print_line
+
+    echo
+    echo "按 Ctrl+C 退出日志。"
+    echo
+
+    journalctl -u "${SERVICE_NAME}" -f
+}
+
+
+# =========================================================
+# 删除
+# =========================================================
+
+delete_lyingman() {
+
+    print_line
+    echo "              删除 LyingMan"
+    print_line
+
+    echo
+    echo "⚠️  警告："
+    echo
+    echo "这将删除："
+    echo "- LyingMan 程序"
+    echo "- systemd 服务"
+    echo "- Nginx 配置"
+    echo "- 域名配置"
+    echo
+    echo "以前创建的备份目录不会删除。"
+    echo
+
+    read -r -p "确定要删除吗？ [y/N]: " CONFIRM
+
+    if [[ ! "${CONFIRM}" =~ ^[Yy]$ ]]; then
+        echo
+        echo "已取消删除。"
+        pause
+        return
+    fi
+
+    echo
+    echo "开始删除..."
+
+    systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+    systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+
+    rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+
+    systemctl daemon-reload
+
+    rm -rf "${APP_DIR}"
+
+    rm -f "${NGINX_LINK}"
+    rm -f "${NGINX_CONF}"
+
+    rm -f "${DOMAIN_FILE}"
+
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+
+    echo
+    echo "=============================================="
+    echo "          LyingMan 已删除"
+    echo "=============================================="
+
+    pause
+}
+
+
+# =========================================================
+# 修改域名
+# =========================================================
+
+change_domain() {
+
+    print_line
+    echo "              修改域名 / HTTPS"
+    print_line
+
+    echo
+    echo "请输入新的域名。"
+    echo "如果想改成 IP + HTTP，直接按 Enter。"
+    echo
+
+    read -r -p "新域名: " NEW_DOMAIN
+
+    if [ -z "${NEW_DOMAIN}" ]; then
+
+        rm -f "${DOMAIN_FILE}"
+
+        configure_network
+
+    else
+
+        echo "${NEW_DOMAIN}" > "${DOMAIN_FILE}"
+
+        configure_network
+
+    fi
+
+    pause
+}
+
+
+# =========================================================
+# 更新项目
+# =========================================================
+
+update_lyingman() {
+
+    print_line
+    echo "              更新 LyingMan"
+    print_line
+
+    if [ ! -d "${APP_DIR}/.git" ]; then
+        echo
+        echo "❌ 没有找到 LyingMan Git 仓库。"
+        echo "请使用“1. 安装 / 重新安装”。"
+        pause
+        return
+    fi
+
+    echo
+    echo "正在停止服务..."
+
+    systemctl stop "${SERVICE_NAME}" || true
+
+    echo "正在更新代码..."
+
+    cd "${APP_DIR}"
+
+    git fetch origin
+    git reset --hard origin/main
+
+    fix_package_json
+
+    echo
+    echo "正在重新安装依赖..."
+
+    cd "${APP_DIR}/server"
+
+    "${NPM_BIN}" install --unsafe-perm
+
+    echo
+    echo "正在启动服务..."
+
+    systemctl daemon-reload
+    systemctl restart "${SERVICE_NAME}"
+
+    sleep 3
+
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        echo
+        echo "✅ LyingMan 更新完成"
+    else
+        echo
+        echo "❌ 更新后启动失败"
+
+        systemctl status "${SERVICE_NAME}" --no-pager
+    fi
+
+    pause
+}
+
+
+# =========================================================
+# 主菜单
+# =========================================================
+
+main_menu() {
+
+    while true; do
+
+        clear
+
+        echo
+        print_line
+        echo "          LyingMan 狼人杀管理脚本"
+        print_line
+        echo
+
+        echo "  1. 安装 / 重新安装"
+        echo "  2. 启动"
+        echo "  3. 停止"
+        echo "  4. 重启"
+        echo "  5. 查看状态"
+        echo "  6. 查看日志"
+        echo "  7. 删除 LyingMan"
+        echo "  8. 修改域名 / HTTPS"
+        echo "  9. 更新 LyingMan"
+        echo "  0. 退出"
+
+        echo
+        print_line
+
+        read -r -p "请选择 [0-9]: " CHOICE
+
+        case "${CHOICE}" in
+
+            1)
+                install_lyingman
+                ;;
+
+            2)
+                start_service
+                ;;
+
+            3)
+                stop_service
+                ;;
+
+            4)
+                restart_service
+                ;;
+
+            5)
+                show_status
+                ;;
+
+            6)
+                show_logs
+                ;;
+
+            7)
+                delete_lyingman
+                ;;
+
+            8)
+                change_domain
+                ;;
+
+            9)
+                update_lyingman
+                ;;
+
+            0)
+                echo
+                echo "退出。"
+                exit 0
+                ;;
+
+            *)
+                echo
+                echo "❌ 无效选项，请输入 0-9。"
+                sleep 1
+                ;;
+
+        esac
+
+    done
+}
+
+
+# =========================================================
+# 启动
+# =========================================================
+
+check_root
+main_menu
